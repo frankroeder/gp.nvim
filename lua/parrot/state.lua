@@ -42,13 +42,7 @@ end
 --- @param available_models table
 function State:load_models(provider, model_type, available_models)
   local state_model = self.file_state and self.file_state[provider] and self.file_state[provider][model_type]
-  local is_valid_model = false
-
-  if model_type == "chat_model" then
-    is_valid_model = utils.contains(available_models[provider], state_model)
-  elseif model_type == "command_model" then
-    is_valid_model = utils.contains(available_models[provider], state_model)
-  end
+  local is_valid_model = state_model and utils.contains(available_models[provider], state_model)
 
   if self._state[provider][model_type] == nil then
     if state_model and is_valid_model then
@@ -65,20 +59,21 @@ end
 function State:refresh(available_providers, available_models)
   self:init_file_state(available_providers)
   self:init_state(available_providers, available_models)
-  self._state.current_provider.chat = self._state.current_provider.chat
-    or self.file_state.current_provider.chat
-    or available_providers[1]
-  self._state.current_provider.command = self._state.current_provider.command
-    or self.file_state.current_provider.command
-    or available_providers[1]
+
+  local function set_current_provider(key)
+    self._state.current_provider[key] = self._state.current_provider[key]
+      or self.file_state.current_provider[key]
+      or available_providers[1]
+    if not utils.contains(available_providers, self._state.current_provider[key]) then
+      self._state.current_provider[key] = available_providers[1]
+    end
+  end
+
+  set_current_provider("chat")
+  set_current_provider("command")
+
   self._state.last_chat = self._state.last_chat or self.file_state.last_chat or nil
 
-  if not utils.contains(available_providers, self._state.current_provider.chat) then
-    self._state.current_provider.chat = available_providers[1]
-  end
-  if not utils.contains(available_providers, self._state.current_provider.command) then
-    self._state.current_provider.command = available_providers[1]
-  end
   self:save()
 end
 
@@ -124,11 +119,8 @@ end
 --- @param model_type string # Type of model ('chat' or 'command').
 --- @return table|nil
 function State:get_model(provider, model_type)
-  if model_type == "chat" then
-    return self._state[provider].chat_model or self.file_state[provider].chat_model
-  elseif model_type == "command" then
-    return self._state[provider].command_model or self.file_state[provider].command_model
-  end
+  local key = model_type .. "_model"
+  return self._state[provider][key] or self.file_state[provider][key]
 end
 
 --- Sets the last opened chat file path.

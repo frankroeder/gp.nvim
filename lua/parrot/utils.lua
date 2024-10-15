@@ -3,58 +3,61 @@ local pft = require("plenary.filetype")
 local M = {}
 
 -- Trim leading whitespace and tabs from a string.
----@param str string # The input string to be trimmed.
----@return string # The trimmed string.
-M.trim = function(str)
-  return str:gsub("^[\t ]+", ""):gsub("\n[\t ]+", "\n")
+---@param str string The input string to be trimmed.
+---@return string The trimmed string.
+function M.trim(str)
+  return str:gsub("^%s+", ""):gsub("\n%s+", "\n")
 end
 
 -- Feed keys to Neovim.
----@param keys string # string of keystrokes
----@param mode string # string of vim mode ('n', 'i', 'c', etc.), default is 'n'
-M.feedkeys = function(keys, mode)
+---@param keys string String of keystrokes
+---@param mode string String of vim mode ('n', 'i', 'c', etc.), default is 'n'
+function M.feedkeys(keys, mode)
   mode = mode or "n"
-  keys = vim.api.nvim_replace_termcodes(keys, true, false, true)
+  keys = vim.api.nvim_replace_termcodes(keys, true, true, true)
   vim.api.nvim_feedkeys(keys, mode, true)
 end
 
 -- Set keymap for multiple buffers.
----@param buffers table # table of buffers
----@param mode table | string # mode(s) to set keymap for
----@param key string # shortcut key
----@param callback function | string # callback or string to set keymap
----@param desc string | nil # optional description for keymap
-M.set_keymap = function(buffers, mode, key, callback, desc)
+---@param buffers table Table of buffers
+---@param mode table|string Mode(s) to set keymap for
+---@param key string Shortcut key
+---@param callback function|string Callback or string to set keymap
+---@param desc string|nil Optional description for keymap
+function M.set_keymap(buffers, mode, key, callback, desc)
   for _, buf in ipairs(buffers) do
-    vim.keymap.set(mode, key, callback, {
+    local opts = {
       noremap = true,
       silent = true,
       nowait = true,
       buffer = buf,
       desc = desc,
-    })
+    }
+    vim.keymap.set(mode, key, callback, opts)
   end
 end
 
 -- Create an autocommand for specified events and buffers.
----@param events string | table # events to listen to
----@param buffers table | nil # buffers to listen to (nil for all buffers)
----@param callback function # callback to call
----@param gid number # augroup id
-M.autocmd = function(events, buffers, callback, gid)
+---@param events string|table Events to listen to
+---@param buffers table|nil Buffers to listen to (nil for all buffers)
+---@param callback function Callback to call
+---@param gid number Augroup id
+function M.autocmd(events, buffers, callback, gid)
   if buffers then
     for _, buf in ipairs(buffers) do
-      vim.api.nvim_create_autocmd(events, {
+      local opts = {
         group = gid,
         buffer = buf,
         callback = vim.schedule_wrap(callback),
-      })
+      }
+      vim.api.nvim_create_autocmd(events, opts)
     end
   else
-    vim.api.nvim_create_autocmd(events, {
+    local opts = {
       group = gid,
       callback = vim.schedule_wrap(callback),
-    })
+    }
+    vim.api.nvim_create_autocmd(events, opts)
   end
 end
 

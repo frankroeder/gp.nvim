@@ -371,7 +371,7 @@ function M.setup(opts)
     Retry = "retry",
   }
 
-  M.chat_handler = ChatHandler:new(M.options, M.providers, M.available_providers, available_models, M.cmd)
+  M.chat_handler = ChatHandler:new(M.options, M.providers, M.available_providers, M.available_models, M.cmd)
   M.chat_handler:prepare_commands()
   M.add_default_commands(M.cmd, M.hooks, M.options)
   M.chat_handler:buf_handler()
@@ -427,7 +427,7 @@ M.add_default_commands = function(commands, hooks, options)
       end, {
         nargs = "?",
         range = true,
-        desc = "Parrot LLM plugin",
+        desc = "Parrot LLM plugin: " .. cmd,
         complete = function()
           if completions[cmd] then
             return completions[cmd]

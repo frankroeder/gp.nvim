@@ -11,9 +11,11 @@ local Spinner = require("parrot.spinner")
 local Job = require("plenary.job")
 local pft = require("plenary.filetype")
 local ResponseHandler = require("parrot.response_handler")
+local BufferManager = require("parrot.buffer_manager")
+local CommandManager = require("parrot.command_manager")
+local ToggleManager = require("parrot.toggle_manager")
 
 local ChatHandler = {}
-
 ChatHandler.__index = ChatHandler
 
 function ChatHandler:new(options, providers, available_providers, available_models, commands)
@@ -23,20 +25,19 @@ function ChatHandler:new(options, providers, available_providers, available_mode
     _plugin_name = "parrot.nvim",
     options = options,
     providers = providers,
-    current_provider = {
-      chat = nil,
-      command = nil,
-    },
+    current_provider = { chat = nil, command = nil },
     pool = Pool:new(),
     queries = Queries:new(),
+    buffer_manager = BufferManager:new(options, state),
+		toggle_manager = ToggleManager:new(),
     commands = commands,
     state = state,
     _toggle = {},
     _toggle_kind = {
-      unknown = 0, -- unknown toggle
-      chat = 1, -- chat toggle
-      popup = 2, -- popup toggle
-      context = 3, -- context toggle
+      unknown = 0,
+      chat = 1,
+      popup = 2,
+      context = 3,
     },
     available_providers = available_providers,
     available_models = available_models,
@@ -49,6 +50,8 @@ function ChatHandler:new(options, providers, available_providers, available_mode
   }, self)
 end
 
+--- Retrieves status information about the current buffer.
+---@return table { is_chat = boolean, prov = table | nil, model = string }
 function ChatHandler:get_status_info()
   local buf = vim.api.nvim_get_current_buf()
   local file_name = vim.api.nvim_buf_get_name(buf)
@@ -57,40 +60,37 @@ function ChatHandler:get_status_info()
   return { is_chat = is_chat, prov = self.current_provider, model = model_obj.name }
 end
 
+--- Sets the current provider for chat or command.
+---@param selected_prov string Selected provider name.
+---@param is_chat boolean True for chat provider, false for command provider.
 function ChatHandler:set_provider(selected_prov, is_chat)
   local endpoint = self.providers[selected_prov].endpoint
   local api_key = self.providers[selected_prov].api_key
   local _prov = init_provider(selected_prov, endpoint, api_key)
-  if is_chat then
-    self.current_provider.chat = _prov
-  else
-    self.current_provider.command = _prov
-  end
+  self.current_provider[is_chat and "chat" or "command"] = _prov
   self.state:set_provider(_prov.name, is_chat)
   self.state:refresh(self.available_providers, self.available_models)
-  self:prepare_commands()
+  self.command_manager:prepare_commands() -- Delegate to CommandManager
 end
 
+--- Retrieves the current provider for chat or command.
+---@param is_chat boolean True for chat provider, false for command provider.
+---@return table | nil Provider table or nil if not found.
 function ChatHandler:get_provider(is_chat)
-  local current_prov = nil
-  if is_chat then
-    current_prov = self.current_provider.chat
-  else
-    current_prov = self.current_provider.command
-  end
-
+  local current_prov = self.current_provider[is_chat and "chat" or "command"]
   if not current_prov then
     local prov = self.state:get_provider(is_chat)
+    if not prov then
+      logger.error(string.format("No provider found for %s", is_chat and "chat" or "command"))
+      return nil
+    end
     self:set_provider(prov, is_chat)
+    current_prov = self.current_provider[is_chat and "chat" or "command"]
   end
-
-  if is_chat then
-    return self.current_provider.chat
-  else
-    return self.current_provider.command
-  end
+  return current_prov
 end
 
+--- Handles buffer events by delegating to BufferManager.
 function ChatHandler:buf_handler()
   local gid = utils.create_augroup("PrtBufHandler", { clear = true })
 
@@ -103,22 +103,13 @@ function ChatHandler:buf_handler()
 
     local file_name = vim.api.nvim_buf_get_name(buf)
 
-    self:prep_chat(buf, file_name)
-    self:prep_context(buf, file_name)
+    -- Delegate to BufferManager
+    self.buffer_manager:prepare_chat(buf, file_name)
+    self.buffer_manager:prepare_context(buf, file_name)
   end, gid)
 end
 
-function ChatHandler:prep_chat(buf, file_name)
-  if not utils.is_chat(buf, file_name, self.options.chat_dir) then
-    return
-  end
-
-  if buf ~= vim.api.nvim_get_current_buf() then
-    return
-  end
-
-  chatutils.prep_md(buf)
-
+function ChatHandler:setup_chat_prompt(buf)
   if self.options.chat_prompt_buf_type then
     vim.api.nvim_set_option_value("buftype", "prompt", { buf = buf })
     vim.fn.prompt_setprompt(buf, "")
@@ -126,8 +117,9 @@ function ChatHandler:prep_chat(buf, file_name)
       self:chat_respond({ args = "" })
     end)
   end
+end
 
-  -- setup chat specific commands
+function ChatHandler:setup_chat_commands(buf)
   local range_commands = {
     {
       command = "ChatRespond",
@@ -143,21 +135,26 @@ function ChatHandler:prep_chat(buf, file_name)
     },
   }
   for _, rc in ipairs(range_commands) do
-    local cmd = self.options.cmd_prefix .. rc.command .. "<cr>"
-    for _, mode in ipairs(rc.modes) do
-      if mode == "n" or mode == "i" then
-        utils.set_keymap({ buf }, mode, rc.shortcut, function()
-          vim.api.nvim_command(self.options.cmd_prefix .. rc.command)
-          -- go to normal mode
-          vim.api.nvim_command("stopinsert")
-          utils.feedkeys("<esc>", "xn")
-        end, rc.comment)
-      else
-        utils.set_keymap({ buf }, mode, rc.shortcut, ":<C-u>'<,'>" .. cmd, rc.comment)
-      end
+    self:setup_chat_command(buf, rc)
+  end
+end
+
+function ChatHandler:setup_chat_command(buf, command_info)
+  local cmd = self.options.cmd_prefix .. command_info.command .. "<cr>"
+  for _, mode in ipairs(command_info.modes) do
+    if mode == "n" or mode == "i" then
+      utils.set_keymap({ buf }, mode, command_info.shortcut, function()
+        vim.api.nvim_command(self.options.cmd_prefix .. command_info.command)
+        vim.api.nvim_command("stopinsert")
+        utils.feedkeys("<esc>", "xn")
+      end, command_info.comment)
+    else
+      utils.set_keymap({ buf }, mode, command_info.shortcut, ":<C-u>'<,'>" .. cmd, command_info.comment)
     end
   end
+end
 
+function ChatHandler:setup_chat_shortcuts(buf)
   local ds = self.options.chat_shortcut_delete
   utils.set_keymap({ buf }, ds.modes, ds.shortcut, function()
     self:chat_delete()
@@ -167,74 +164,48 @@ function ChatHandler:prep_chat(buf, file_name)
   utils.set_keymap({ buf }, ss.modes, ss.shortcut, function()
     self:stop()
   end, "Parrot Chat Stop")
-
-  -- remember last opened chat file
-  self.state:set_last_chat(file_name)
-  self.state:refresh(self.available_providers, self.available_models)
 end
 
+--- Delegates context preparation to BufferManager.
+---@param buf number Buffer number.
+---@param file_name string Name of the context file.
 function ChatHandler:prep_context(buf, file_name)
-  if not utils.ends_with(file_name, ".parrot.md") then
-    return
-  end
-
-  if buf ~= vim.api.nvim_get_current_buf() then
-    return
-  end
-
-  chatutils.prep_md(buf)
+  self.buffer_manager:prepare_context(buf, file_name)
 end
 
----@param kind number # kind of toggle
----@return boolean # true if toggle was closed
+--- Toggles (closes) a specific toggle kind using ToggleManager.
+---@param kind number Kind of toggle.
+---@return boolean True if toggle was closed.
 function ChatHandler:toggle_close(kind)
-  if
-    self._toggle[kind]
-    and self._toggle[kind].win
-    and self._toggle[kind].buf
-    and self._toggle[kind].close
-    and vim.api.nvim_win_is_valid(self._toggle[kind].win)
-    and vim.api.nvim_buf_is_valid(self._toggle[kind].buf)
-    and vim.api.nvim_win_get_buf(self._toggle[kind].win) == self._toggle[kind].buf
-  then
-    if #vim.api.nvim_list_wins() == 1 then
-      logger.warning("Can't close the last window.")
-    else
-      self._toggle[kind].close()
-      self._toggle[kind] = nil
-    end
-    return true
-  end
-  self._toggle[kind] = nil
-  return false
+  return self.toggle_manager:close(kind)
 end
 
----@param kind number # kind of toggle
----@param toggle table # table containing `win`, `buf`, and `close` information
+--- Adds a toggle using ToggleManager.
+---@param kind number Kind of toggle.
+---@param toggle table Table containing `win`, `buf`, and `close` information.
 function ChatHandler:toggle_add(kind, toggle)
-  self._toggle[kind] = toggle
+  self.toggle_manager:add(kind, toggle)
 end
 
----@param kind string # string representation of the toggle kind
----@return number # numeric kind of the toggle
+--- Resolves a toggle kind string to its numeric representation using ToggleManager.
+---@param kind string String representation of the toggle kind.
+---@return number Numeric kind of the toggle.
 function ChatHandler:toggle_resolve(kind)
-  kind = kind:lower()
-  if kind == "chat" then
-    return self._toggle_kind.chat
-  elseif kind == "popup" then
-    return self._toggle_kind.popup
-  elseif kind == "context" then
-    return self._toggle_kind.context
-  end
-  logger.warning("Unknown toggle kind: " .. kind)
-  return self._toggle_kind.unknown
+  return self.toggle_manager:resolve(kind)
 end
 
----@return table # { name, system_prompt, provider }
+--- Retrieves the model information based on the model type.
+---@param model_type string "chat" or "command".
+---@return table { name, system_prompt, provider }
 function ChatHandler:get_model(model_type)
-  local prov = self:get_provider(model_type == "chat")
+  local is_chat = model_type == "chat"
+  local prov = self:get_provider(is_chat)
+  if not prov then
+    logger.error("Provider not available for model type: " .. model_type)
+    return {}
+  end
   local model = self.state:get_model(prov.name, model_type)
-  local system_prompt = self.options.system_prompt[model_type]
+  local system_prompt = self.options.system_prompt[model_type] or ""
   return {
     name = model,
     system_prompt = system_prompt,
@@ -242,55 +213,23 @@ function ChatHandler:get_model(model_type)
   }
 end
 
--- creates prompt commands for each target
+--- Prepares commands by delegating to CommandManager.
 function ChatHandler:prepare_commands()
-  for name, target in pairs(ui.Target) do
-    -- uppercase first letter
-    local command = name:gsub("^%l", string.upper)
-
-    local model_obj = self:get_model("command")
-    -- popup is like ephemeral one off chat
-    if target == ui.Target.popup then
-      model_obj = self:get_model("chat")
-    end
-
-    local cmd = function(params)
-      -- template is chosen dynamically based on mode in which the command is called
-      local template = self.options.template_command
-      if params.range == 2 then
-        template = self.options.template_selection
-        -- rewrite needs custom template
-        if target == ui.Target.rewrite then
-          template = self.options.template_rewrite
-        end
-        if target == ui.Target.append then
-          template = self.options.template_append
-        end
-        if target == ui.Target.prepend then
-          template = self.options.template_prepend
-        end
-      end
-      local cmd_prefix = utils.template_render_from_list(
-        self.options.command_prompt_prefix_template,
-        { ["{{llm}}"] = self:get_model("command").name }
-      )
-      self:prompt(params, target, model_obj, cmd_prefix, utils.trim(template), true)
-    end
-    self.commands[command] = command
-    self:addCommand(command, function(params)
-      cmd(params)
-    end)
+  if not self.command_manager then
+    self.command_manager = CommandManager:new(self.options, self)
   end
+  self.command_manager:prepare_commands()
 end
 
+--- Adds a command by delegating to CommandManager.
+-- @param command string Command name.
+-- @param cmd function Command callback.
 function ChatHandler:addCommand(command, cmd)
-  self[command] = function(self, params)
-    cmd(params)
-  end
+  self.command_manager:add_command(command, cmd)
 end
 
--- stop receiving responses for all processes and create a new pool
----@param signal number | nil # signal to send to the process
+--- Stops all ongoing processes by killing associated jobs.
+---@param signal number | nil Signal to send to the processes.
 function ChatHandler:stop(signal)
   if self.pool:is_empty() then
     return
@@ -305,9 +244,11 @@ function ChatHandler:stop(signal)
   self.pool = Pool:new()
 end
 
+--- Handles context-related actions.
+---@param params table Parameters for the context action.
 function ChatHandler:context(params)
   self:toggle_close(self._toggle_kind.popup)
-  -- if there is no selection, try to close context toggle
+  -- If there is no selection, try to close context toggle
   if params.range ~= 2 then
     if self:toggle_close(self._toggle_kind.context) then
       return
@@ -337,7 +278,7 @@ function ChatHandler:context(params)
   if params.args == "" then
     params.args = self.options.toggle_target
   end
-  local target = chatutils.resolve_buf_target(params)
+  local target = chatutils.resolve_buffer_target(params)
   buf = self:open_buf(file_name, target, self._toggle_kind.context, true)
 
   if params.range == 2 then
@@ -347,10 +288,16 @@ function ChatHandler:context(params)
   utils.feedkeys("G", "xn")
 end
 
+--- Opens a buffer based on the provided parameters.
+---@param file_name string Name of the file to open.
+---@param target number Buffer target.
+---@param kind number Kind of toggle.
+---@param toggle boolean Whether to toggle the buffer.
+---@return number Buffer number.
 function ChatHandler:open_buf(file_name, target, kind, toggle)
   target = target or ui.BufTarget.current
 
-  -- close previous popup if it exists
+  -- Close previous popup if it exists
   self:toggle_close(self._toggle_kind.popup)
 
   if toggle then
@@ -384,19 +331,19 @@ function ChatHandler:open_buf(file_name, target, kind, toggle)
     end
 
     if old_buf == nil then
-      -- read file into buffer and force write it
+      -- Read file into buffer and force write it
       vim.api.nvim_command("silent 0read " .. file_name)
       vim.api.nvim_command("silent file " .. file_name)
       vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
     else
-      -- move cursor to the beginning of the file and scroll to the end
+      -- Move cursor to the beginning of the file and scroll to the end
       utils.feedkeys("ggG", "xn")
     end
 
-    -- delete whitespace lines at the end of the file
+    -- Delete whitespace lines at the end of the file
     local last_content_line = utils.last_content_line(buf)
     vim.api.nvim_buf_set_lines(buf, last_content_line, -1, false, {})
-    -- insert a new line at the end of the file
+    -- Insert a new line at the end of the file
     vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "" })
     vim.api.nvim_command("silent write! " .. file_name)
   elseif target == ui.BufTarget.split then
@@ -406,7 +353,7 @@ function ChatHandler:open_buf(file_name, target, kind, toggle)
   elseif target == ui.BufTarget.tabnew then
     vim.api.nvim_command("tabnew " .. file_name)
   else
-    -- is it already open in a buffer?
+    -- Check if it's already open in a buffer
     for _, b in ipairs(vim.api.nvim_list_bufs()) do
       if vim.api.nvim_buf_get_name(b) == file_name then
         for _, w in ipairs(vim.api.nvim_list_wins()) do
@@ -418,7 +365,7 @@ function ChatHandler:open_buf(file_name, target, kind, toggle)
       end
     end
 
-    -- open in new buffer
+    -- Open in new buffer
     vim.api.nvim_command("edit " .. file_name)
   end
 
@@ -453,14 +400,19 @@ function ChatHandler:open_buf(file_name, target, kind, toggle)
   return buf
 end
 
+--- Creates a new chat file.
+---@param params table Parameters for creating a new chat.
+---@param toggle boolean Whether to toggle the chat buffer.
+---@param chat_prompt string Optional chat prompt.
+---@return number Buffer number.
 function ChatHandler:_new_chat(params, toggle, chat_prompt)
   self:toggle_close(self._toggle_kind.popup)
 
-  -- prepare filename
+  -- Prepare filename
   local time = os.date("%Y-%m-%d.%H-%M-%S")
   local stamp = tostring(math.floor(vim.uv.hrtime() / 1000000) % 1000)
   local cbuf = vim.api.nvim_get_current_buf()
-  -- make sure stamp is 3 digits
+  -- Make sure stamp is 3 digits
   while #stamp < 3 do
     stamp = "0" .. stamp
   end
@@ -482,14 +434,14 @@ function ChatHandler:_new_chat(params, toggle, chat_prompt)
     ["{{user}}"] = self.options.chat_user_prefix,
     ["{{optional}}"] = chat_prompt,
   })
-  -- escape underscores (for markdown)
+  -- Escape underscores (for markdown)
   template = template:gsub("_", "\\_")
-  -- strip leading and trailing newlines
+  -- Strip leading and trailing newlines
   template = template:gsub("^%s*(.-)%s*$", "%1") .. "\n"
 
-  -- create chat file
+  -- Create chat file
   vim.fn.writefile(vim.split(template, "\n"), filename)
-  local target = chatutils.resolve_buf_target(params)
+  local target = chatutils.resolve_buffer_target(params)
   local buf = self:open_buf(filename, target, self._toggle_kind.chat, toggle)
 
   if params.range == 2 then
@@ -499,9 +451,12 @@ function ChatHandler:_new_chat(params, toggle, chat_prompt)
   return buf
 end
 
----@return number # buffer number
+--- Creates a new chat.
+---@param params table Parameters for creating a new chat.
+---@param chat_prompt string Optional chat prompt.
+---@return number Buffer number.
 function ChatHandler:chat_new(params, chat_prompt)
-  -- if chat toggle is open, close it and start a new one
+  -- If chat toggle is open, close it and start a new one
   if self:toggle_close(self._toggle_kind.chat) then
     params.args = params.args or ""
     if params.args == "" then
@@ -516,23 +471,25 @@ function ChatHandler:chat_new(params, chat_prompt)
   return self:_new_chat(params, false, chat_prompt)
 end
 
+--- Toggles the chat buffer.
+---@param params table Parameters for toggling the chat.
 function ChatHandler:chat_toggle(params)
   self:toggle_close(self._toggle_kind.popup)
   if self:toggle_close(self._toggle_kind.chat) and params.range ~= 2 then
     return
   end
 
-  -- create new chat file otherwise
+  -- Create new chat file otherwise
   params.args = params.args or ""
   if params.args == "" then
     params.args = self.options.toggle_target
   end
 
-  -- if the range is 2, we want to create a new chat file with the selection
+  -- If the range is 2, we want to create a new chat file with the selection
   if params.range ~= 2 then
     local last_chat_file = self.state:get_last_chat()
     if last_chat_file and vim.fn.filereadable(last_chat_file) == 1 then
-      self:open_buf(last_chat_file, chatutils.resolve_buf_target(params), self._toggle_kind.chat, true)
+      self:open_buf(last_chat_file, chatutils.resolve_buffer_target(params), self._toggle_kind.chat, true)
       return
     end
   end
@@ -540,19 +497,21 @@ function ChatHandler:chat_toggle(params)
   self:_new_chat(params, true)
 end
 
+--- Pastes selected text into the last chat.
+---@param params table Parameters for pasting.
 function ChatHandler:chat_paste(params)
-  -- if there is no selection, do nothing
+  -- If there is no selection, do nothing
   if params.range ~= 2 then
     logger.warning("Please select some text to paste into the chat.")
     return
   end
 
-  -- get current buffer
+  -- Get current buffer
   local cbuf = vim.api.nvim_get_current_buf()
 
   local last_chat_file = self.state:get_last_chat()
   if last_chat_file and vim.fn.filereadable(last_chat_file) ~= 1 then
-    -- skip rest since new chat will handle snippet on it's own
+    -- Skip rest since new chat will handle snippet on its own
     self:chat_new(params)
     return
   end
@@ -561,7 +520,7 @@ function ChatHandler:chat_paste(params)
   if params.args == "" then
     params.args = self.options.toggle_target
   end
-  local target = chatutils.resolve_buf_target(params)
+  local target = chatutils.resolve_buffer_target(params)
   local buf = utils.get_buffer(last_chat_file)
   local win_found = false
   if buf then
@@ -580,24 +539,25 @@ function ChatHandler:chat_paste(params)
   utils.feedkeys("G", "xn")
 end
 
+--- Deletes the current chat file.
 function ChatHandler:chat_delete()
-  -- get buffer and file
+  -- Get buffer and file
   local buf = vim.api.nvim_get_current_buf()
   local file_name = vim.api.nvim_buf_get_name(buf)
 
-  -- check if file is in the chat dir
+  -- Check if file is in the chat dir
   if not utils.starts_with(file_name, self.options.chat_dir) then
     logger.warning("File " .. vim.inspect(file_name) .. " is not in chat dir")
     return
   end
 
-  -- delete without confirmation
+  -- Delete without confirmation
   if not self.options.chat_confirm_delete then
     futils.delete_file(file_name, self.options.chat_dir)
     return
   end
 
-  -- ask for confirmation
+  -- Ask for confirmation
   vim.ui.input({ prompt = "Delete " .. file_name .. "? [y/N] " }, function(input)
     if input and input:lower() == "y" then
       futils.delete_file(file_name, self.options.chat_dir)
@@ -605,6 +565,8 @@ function ChatHandler:chat_delete()
   end)
 end
 
+--- Handles chat responses by delegating to the querying system.
+---@param params table Parameters for responding.
 function ChatHandler:_chat_respond(params)
   local buf = vim.api.nvim_get_current_buf()
   local win = vim.api.nvim_get_current_win()
@@ -617,31 +579,31 @@ function ChatHandler:_chat_respond(params)
     return
   end
 
-  -- go to normal mode
+  -- Go to normal mode
   vim.cmd("stopinsert")
 
-  -- get all lines
+  -- Get all lines
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 
-  -- check if file looks like a chat file
+  -- Check if file looks like a chat file
   local file_name = vim.api.nvim_buf_get_name(buf)
   if not utils.is_chat(buf, file_name, self.options.chat_dir) then
     logger.warning("File " .. vim.inspect(file_name) .. " does not look like a chat file")
     return
   end
 
-  -- headers are fields before first message ---
+  -- Headers are fields before first message ---
   local headers = {}
   local header_end = nil
-  local line_idx = 0
-  ---parse headers
+  local line_idx = 1 -- Lua tables are 1-based
+  -- Parse headers
   for _, line in ipairs(lines) do
-    -- first line starts with ---
+    -- First line starts with ---
     if line:sub(1, 3) == "---" then
       header_end = line_idx
       break
     end
-    -- parse header fields
+    -- Parse header fields
     local key, value = line:match("^[-#] (%w+): (.*)")
     if key ~= nil then
       headers[key] = value
@@ -655,12 +617,12 @@ function ChatHandler:_chat_respond(params)
     return
   end
 
-  -- message needs role and content
+  -- Messages need role and content
   local messages = {}
   local role = ""
   local content = ""
 
-  -- iterate over lines
+  -- Iterate over lines
   local start_index = header_end + 1
   local end_index = #lines
   if params.range == 2 then
@@ -669,7 +631,6 @@ function ChatHandler:_chat_respond(params)
   end
 
   if headers.system and headers.system:match("%S") then
-    ---@diagnostic disable-next-line: cast-local-type
     model_name = model_name .. " & custom system prompt"
   end
 
@@ -679,7 +640,6 @@ function ChatHandler:_chat_respond(params)
   local llm_prefix = self.options.llm_prefix
   local llm_suffix = "[{{llm}}]"
   local provider = query_prov.name
-  ---@diagnostic disable-next-line: cast-local-type
   llm_suffix = utils.template_render_from_list(llm_suffix, { ["{{llm}}"] = model_name .. " - " .. provider })
 
   for index = start_index, end_index do
@@ -696,10 +656,10 @@ function ChatHandler:_chat_respond(params)
       content = content .. "\n" .. line
     end
   end
-  -- insert last message not handled in loop
+  -- Insert last message not handled in loop
   table.insert(messages, { role = role, content = content })
 
-  -- replace first empty message with system prompt
+  -- Replace first empty message with system prompt
   content = ""
   if headers.system and headers.system:match("%S") then
     content = headers.system
@@ -707,12 +667,12 @@ function ChatHandler:_chat_respond(params)
     content = model_obj.system_prompt
   end
   if content:match("%S") then
-    -- make it multiline again if it contains escaped newlines
+    -- Make it multiline again if it contains escaped newlines
     content = content:gsub("\\n", "\n")
     messages[1] = { role = "system", content = content }
   end
 
-  -- write assistant prompt
+  -- Write assistant prompt
   local last_content_line = utils.last_content_line(buf)
   vim.api.nvim_buf_set_lines(buf, last_content_line, last_content_line, false, { "", llm_prefix .. llm_suffix, "" })
 
@@ -722,7 +682,7 @@ function ChatHandler:_chat_respond(params)
     spinner:start("calling API...")
   end
 
-  -- call the model and write response
+  -- Call the model and write response
   self:query(
     buf,
     query_prov,
@@ -739,7 +699,7 @@ function ChatHandler:_chat_respond(params)
         return
       end
 
-      -- write user prompt
+      -- Write user prompt
       last_content_line = utils.last_content_line(buf)
       utils.undojoin(buf)
       vim.api.nvim_buf_set_lines(
@@ -750,28 +710,28 @@ function ChatHandler:_chat_respond(params)
         { "", "", self.options.chat_user_prefix, "" }
       )
 
-      -- delete whitespace lines at the end of the file
+      -- Delete whitespace lines at the end of the file
       last_content_line = utils.last_content_line(buf)
       utils.undojoin(buf)
       vim.api.nvim_buf_set_lines(buf, last_content_line, -1, false, {})
-      -- insert a new line at the end of the file
+      -- Insert a new line at the end of the file
       utils.undojoin(buf)
       vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "" })
 
-      -- if topic is ?, then generate it
+      -- If topic is ?, then generate it
       if headers.topic == "?" then
-        -- insert last model response
+        -- Insert last model response
         table.insert(messages, { role = "assistant", content = qt.response })
 
         local topic_prov = model_obj.provider
 
-        -- ask model to generate topic/title for the chat
+        -- Ask model to generate topic/title for the chat
         local topic_prompt = self.providers[topic_prov.name].topic_prompt
         if topic_prompt ~= "" then
           table.insert(messages, { role = "user", content = topic_prompt })
         end
 
-        -- prepare invisible buffer for the model to write to
+        -- Prepare invisible buffer for the model to write to
         local topic_buf = vim.api.nvim_create_buf(false, true)
         local topic_resp_handler = ResponseHandler:new(self.queries, topic_buf, nil, 0, false, "", false)
         local topic_handler = topic_resp_handler:create_handler()
@@ -792,7 +752,7 @@ function ChatHandler:_chat_respond(params)
             self.providers[topic_prov.name].topic.params
           ),
         }))
-        -- call the model
+        -- Call the model
         self:query(
           nil,
           topic_prov,
@@ -806,21 +766,21 @@ function ChatHandler:_chat_respond(params)
             if self.options.enable_spinner and topic_spinner then
               topic_spinner:stop()
             end
-            -- get topic from invisible buffer
+            -- Get topic from invisible buffer
             local topic = vim.api.nvim_buf_get_lines(topic_buf, 0, -1, false)[1]
-            -- close invisible buffer
+            -- Close invisible buffer
             vim.api.nvim_buf_delete(topic_buf, { force = true })
-            -- strip whitespace from ends of topic
+            -- Strip whitespace from ends of topic
             topic = topic:gsub("^%s*(.-)%s*$", "%1")
-            -- strip dot from end of topic
+            -- Strip dot from end of topic
             topic = topic:gsub("%.$", "")
 
-            -- if topic is empty do not replace it
+            -- If topic is empty do not replace it
             if topic == "" then
               return
             end
 
-            -- replace topic in current buffer
+            -- Replace topic in current buffer
             utils.undojoin(buf)
             vim.api.nvim_buf_set_lines(buf, 0, 1, false, { "# topic: " .. topic })
           end)
@@ -836,13 +796,15 @@ function ChatHandler:_chat_respond(params)
   )
 end
 
+--- Responds to chat inputs.
+---@param params table Parameters for responding.
 function ChatHandler:chat_respond(params)
   if params.args == "" then
     self:_chat_respond(params)
     return
   end
 
-  -- ensure args is a single positive number
+  -- Ensure args is a single positive number
   local n_requests = tonumber(params.args)
   if n_requests == nil or math.floor(n_requests) ~= n_requests or n_requests <= 0 then
     logger.warning("args for ChatRespond should be a single positive number, not: " .. params.args)
@@ -864,6 +826,7 @@ function ChatHandler:chat_respond(params)
   self:_chat_respond(params)
 end
 
+--- Opens the chat file finder using fzf-lua or native UI.
 function ChatHandler:chat_finder()
   local has_fzf, fzf_lua = pcall(require, "fzf-lua")
 
@@ -877,19 +840,24 @@ function ChatHandler:chat_finder()
       local filename = filename_from_selection(selected)
       return self:open_buf(self.options.chat_dir .. "/" .. filename, ui.BufTarget.popup, self._toggle_kind.chat, false)
     end
-    -- add custom action to delete chat files
-    actions["ctrl-d"] = {
-      fn = function(selected)
-        local filename = filename_from_selection(selected)
-        if vim.fn.confirm("Are you sure you want to delete " .. filename .. "?", "&Yes\n&No", 2) == 1 then
-          futils.delete_file(self.options.chat_dir .. "/" .. filename, self.options.chat_dir)
-          logger.info(filename .. " deleted")
+    -- Add custom action to delete chat files
+    actions["ctrl-d"] = function(selected)
+      local filename = filename_from_selection(selected)
+      if not filename then
+        logger.warning("No valid filename selected for deletion.")
+        return
+      end
+      if vim.fn.confirm(string.format("Are you sure you want to delete '%s'?", filename), "&Yes\n&No", 2) == 1 then
+        local success, err = futils.delete_file(self.options.chat_dir .. "/" .. filename, self.options.chat_dir)
+        if success then
+          logger.info(string.format("Deleted chat file: %s", filename))
+        else
+          logger.error(string.format("Failed to delete '%s': %s", filename, err))
         end
-      end,
-      -- TODO: Fix bug, currently not possible --
-      reload = false,
-    }
+      end
+    end
 
+    -- Set default action based on toggle_target
     if self.options.toggle_target == "popup" then
       actions["default"] = actions["ctrl-p"]
     elseif self.options.toggle_target == "split" then
@@ -912,6 +880,7 @@ function ChatHandler:chat_finder()
     })
     return
   else
+    local scan = require("plenary.scandir") -- Ensure plenary.scandir is available
     local chat_files = scan.scan_dir(self.options.chat_dir, { depth = 1, search_pattern = "%d+%.md$" })
     vim.ui.select(chat_files, {
       prompt = "Select your chat file:",
@@ -935,7 +904,7 @@ function ChatHandler:chat_finder()
       end
       self:open_buf(
         selected_chat,
-        chatutils.resolve_buf_target(self.options.toggle_target),
+        chatutils.resolve_buffer_target(self.options.toggle_target),
         self._toggle_kind.chat,
         false
       )
@@ -943,6 +912,9 @@ function ChatHandler:chat_finder()
   end
 end
 
+--- Switches the current provider.
+---@param selected_prov string Selected provider name.
+---@param is_chat boolean True for chat provider, false for command provider.
 function ChatHandler:switch_provider(selected_prov, is_chat)
   if selected_prov == nil then
     logger.warning("Empty provider selection")
@@ -954,11 +926,19 @@ function ChatHandler:switch_provider(selected_prov, is_chat)
     logger.info("Switched to provider: " .. selected_prov)
     return
   else
-    logger.error("Provider not found: " .. selected_prov)
+    logger.error(
+      string.format(
+        "Provider '%s' not found. Available providers: %s",
+        selected_prov,
+        table.concat(self.available_providers, ", ")
+      )
+    )
     return
   end
 end
 
+--- Handles provider selection via command or UI.
+---@param params table Parameters for provider selection.
 function ChatHandler:provider(params)
   local prov_arg = string.gsub(params.args, "^%s*(.-)%s*$", "%1")
   local has_fzf, fzf_lua = pcall(require, "fzf-lua")
@@ -971,9 +951,11 @@ function ChatHandler:provider(params)
     fzf_lua.fzf_exec(self.available_providers, {
       prompt = "Provider selection ❯",
       fzf_opts = self.options.fzf_lua_opts,
-      complete = function(selection)
-        self:switch_provider(selection[1], is_chat)
-      end,
+      actions = {
+        ["default"] = function(selected)
+          self:switch_provider(selected[1], is_chat)
+        end,
+      },
     })
   else
     vim.ui.select(self.available_providers, {
@@ -984,6 +966,10 @@ function ChatHandler:provider(params)
   end
 end
 
+--- Switches the model for chat or command.
+---@param is_chat boolean True for chat model, false for command model.
+---@param selected_model string Selected model name.
+---@param prov table Provider table.
 function ChatHandler:switch_model(is_chat, selected_model, prov)
   if selected_model == nil then
     logger.warning("Empty model selection")
@@ -997,9 +983,11 @@ function ChatHandler:switch_model(is_chat, selected_model, prov)
     logger.info("Command model: " .. selected_model)
   end
   self.state:refresh(self.available_providers, self.available_models)
-  self:prepare_commands()
+  self.command_manager:prepare_commands() -- Delegate to CommandManager
 end
 
+--- Handles model selection via command or UI.
+---@param params table Parameters for model selection.
 function ChatHandler:model(params)
   local buf = vim.api.nvim_get_current_buf()
   local file_name = vim.api.nvim_buf_get_name(buf)
@@ -1015,14 +1003,16 @@ function ChatHandler:model(params)
     fzf_lua.fzf_exec(prov:get_available_models(fetch_online), {
       prompt = "Model selection ❯",
       fzf_opts = self.options.fzf_lua_opts,
-      complete = function(selection)
-        if #selection == 0 then
-          logger.warning("No model selected")
-          return
-        end
-        local selected_model = selection[1]
-        self:switch_model(is_chat, selected_model, prov)
-      end,
+      actions = {
+        ["default"] = function(selected)
+          if #selected == 0 then
+            logger.warning("No model selected")
+            return
+          end
+          local selected_model = selected[1]
+          self:switch_model(is_chat, selected_model, prov)
+        end,
+      },
     })
   else
     vim.ui.select(prov:get_available_models(fetch_online), {
@@ -1033,6 +1023,8 @@ function ChatHandler:model(params)
   end
 end
 
+--- Retries the last command action.
+---@param params table Parameters for retrying.
 function ChatHandler:retry(params)
   if self.history.last_line1 == nil and self.history.last_line2 == nil then
     return logger.error("No history available to retry: " .. vim.inspect(self.history))
@@ -1051,18 +1043,25 @@ function ChatHandler:retry(params)
   elseif self.history.last_target == ui.Target.prepend then
     template = self.options.template_prepend
   else
-    logger.error("Invalid last target" .. self.history.last_target)
+    logger.error("Invalid last target: " .. tostring(self.history.last_target))
   end
   self:prompt(params, self.history.last_target, model_obj, nil, utils.trim(template), false)
 end
 
+--- Prompts the user and sends the request to the model.
+---@param params table Parameters for prompting.
+---@param target table | number Buffer target.
+---@param model_obj table Model information.
+---@param prompt string Optional prompt for user input.
+---@param template string Template for generating the user prompt.
+---@param reset_history boolean Whether to reset history.
 function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_history)
-  -- enew, new, vnew, tabnew should be resolved into table
+  -- If target is a function, call it to get the actual target
   if type(target) == "function" then
     target = target()
   end
 
-  logger.debug("ChatHandler:prompt - `reset_history`: " .. vim.inspect(reset_history))
+  logger.debug("ChatHandler:prompt - `reset_history`: " .. tostring(reset_history))
   if reset_history == nil or reset_history then
     self.history = {
       last_selection = nil,
@@ -1074,7 +1073,7 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
 
   target = target or ui.Target.enew()
 
-  -- get current buffer
+  -- Get current buffer and window
   local buf = vim.api.nvim_get_current_buf()
   local win = vim.api.nvim_get_current_win()
 
@@ -1083,13 +1082,13 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
     return
   end
 
-  -- defaults to normal mode
+  -- Defaults to normal mode
   local selection = nil
   local prefix = ""
   local start_line = vim.api.nvim_win_get_cursor(0)[1]
   local end_line = start_line
 
-  -- handle range
+  -- Handle range selection
   if params.range == 2 then
     start_line = params.line1
     end_line = params.line2
@@ -1097,13 +1096,13 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
 
     local min_indent = nil
     local use_tabs = false
-    -- measure minimal common indentation for lines with content
+    -- Measure minimal common indentation for lines with content
     for i, line in ipairs(lines) do
       lines[i] = line
-      -- skip whitespace only lines
+      -- Skip whitespace-only lines
       if not line:match("^%s*$") then
         local indent = line:match("^%s*")
-        -- contains tabs
+        -- Check if indentation uses tabs
         if indent:match("\t") then
           use_tabs = true
         end
@@ -1141,15 +1140,15 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
       logger.debug("LAST COMMAND in use " .. self.history.last_command)
       command = self.history.last_command
     end
-    -- dummy handler
+    -- Dummy handler
     local handler = function() end
-    -- default on_exit strips trailing backticks if response was markdown snippet
+    -- Default on_exit strips trailing backticks if response was markdown snippet
     local on_exit = function(qid)
       local qt = self.queries:get(qid)
       if not qt then
         return
       end
-      -- if buf is not valid, return
+      -- If buffer is not valid, return
       if not vim.api.nvim_buf_is_valid(buf) then
         return
       end
@@ -1157,9 +1156,9 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
       local flc, llc
       local fl = qt.first_line
       local ll = qt.last_line
-      -- remove empty lines from the start and end of the response
+      -- Remove empty lines from the start and end of the response
       while true do
-        -- get content of first_line and last_line
+        -- Get content of first_line and last_line
         flc = vim.api.nvim_buf_get_lines(buf, fl, fl + 1, false)[1]
         llc = vim.api.nvim_buf_get_lines(buf, ll, ll + 1, false)[1]
 
@@ -1170,12 +1169,12 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
         local flm = flc:match("%S")
         local llm = llc:match("%S")
 
-        -- break loop if both lines contain non-whitespace characters
+        -- Break loop if both lines contain non-whitespace characters
         if flm and llm then
           break
         end
 
-        -- break loop lines are equal
+        -- Break loop if lines are equal
         if fl >= ll then
           break
         end
@@ -1190,12 +1189,12 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
         ll = ll - 1
       end
 
-      -- if fl and ll starts with triple backticks, remove these lines
+      -- If fl and ll start with triple backticks, remove these lines
       if flc and llc and flc:match("^%s*```") and llc:match("^%s*```") then
-        -- remove first line with undojoin
+        -- Remove first line with undojoin
         utils.undojoin(buf)
         vim.api.nvim_buf_set_lines(buf, fl, fl + 1, false, {})
-        -- remove last line
+        -- Remove last line
         utils.undojoin(buf)
         vim.api.nvim_buf_set_lines(buf, ll - 1, ll, false, {})
         ll = ll - 2
@@ -1203,17 +1202,17 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
       qt.first_line = fl
       qt.last_line = ll
 
-      -- option to not select response automatically
+      -- Option to not select response automatically
       if not self.options.command_auto_select_response then
         return
       end
 
-      -- don't select popup response
+      -- Don't select popup response
       if target == ui.Target.popup then
         return
       end
 
-      -- default works for rewrite and enew
+      -- Default works for rewrite and enew
       local start = fl
       local finish = ll
 
@@ -1225,13 +1224,13 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
         finish = self._selection_last_line + ll - fl
       end
 
-      -- select from first_line to last_line
+      -- Select from first_line to last_line
       vim.api.nvim_win_set_cursor(0, { start + 1, 0 })
       vim.api.nvim_command("normal! V")
       vim.api.nvim_win_set_cursor(0, { finish + 1, 0 })
     end
 
-    -- prepare messages
+    -- Prepare messages
     local messages = {}
     local filetype = pft.detect(vim.api.nvim_buf_get_name(buf), {})
     local filename = vim.api.nvim_buf_get_name(buf)
@@ -1243,7 +1242,7 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
     if sys_prompt ~= "" then
       local repo_instructions = futils.find_repo_instructions()
       if repo_instructions ~= "" and sys_prompt ~= "" then
-        -- append the repository instructions from .parrot.md to the system prompt
+        -- Append the repository instructions from .parrot.md to the system prompt
         sys_prompt = sys_prompt .. "\n" .. repo_instructions
       end
       table.insert(messages, { role = "system", content = sys_prompt })
@@ -1256,7 +1255,7 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
     table.insert(messages, { role = "user", content = user_prompt })
     logger.debug("ChatHandler:prompt - `user_prompt`: " .. user_prompt)
 
-    -- cancel possible visual mode before calling the model
+    -- Cancel possible visual mode before calling the model
     utils.feedkeys("<esc>", "xn")
 
     local cursor = true
@@ -1264,89 +1263,10 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
       cursor = false
     end
 
-    -- mode specific logic
-    if target == ui.Target.rewrite then
-      -- delete selection
-      vim.api.nvim_buf_set_lines(buf, start_line - 1, end_line - 1, false, {})
-      -- prepare handler
-      handler = ResponseHandler:new(self.queries, buf, win, start_line - 1, true, prefix, cursor):create_handler()
-    elseif target == ui.Target.append then
-      -- move cursor to the end of the selection
-      vim.api.nvim_win_set_cursor(0, { end_line, 0 })
-      -- put newline after selection
-      vim.api.nvim_put({ "" }, "l", true, true)
-      -- prepare handler
-      handler = ResponseHandler:new(self.queries, buf, win, end_line, true, prefix, cursor):create_handler()
-    elseif target == ui.Target.prepend then
-      -- move cursor to the start of the selection
-      vim.api.nvim_win_set_cursor(0, { start_line, 0 })
-      -- put newline before selection
-      vim.api.nvim_put({ "" }, "l", false, true)
-      -- prepare handler
-      handler = ResponseHandler:new(self.queries, buf, win, start_line - 1, true, prefix, cursor):create_handler()
-    elseif target == ui.Target.popup then
-      self:toggle_close(self._toggle_kind.popup)
-      -- create a new buffer
-      local popup_close = nil
-      buf, win, popup_close, _ = ui.create_popup(
-        nil,
-        self._plugin_name .. " popup (close with <esc>/<C-c>)",
-        function(w, h)
-          local top = self.options.style_popup_margin_top or 2
-          local bottom = self.options.style_popup_margin_bottom or 8
-          local left = self.options.style_popup_margin_left or 1
-          local right = self.options.style_popup_margin_right or 1
-          local max_width = self.options.style_popup_max_width or 160
-          local ww = math.min(w - (left + right), max_width)
-          local wh = h - (top + bottom)
-          return ww, wh, top, (w - ww) / 2
-        end,
-        { on_leave = true, escape = true },
-        { border = self.options.style_popup_border or "single" }
-      )
-      -- set the created buffer as the current buffer
-      vim.api.nvim_set_current_buf(buf)
-      -- set the filetype to markdown
-      vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
-      -- better text wrapping
-      vim.api.nvim_command("setlocal wrap linebreak")
-      -- prepare handler
-      handler = ResponseHandler:new(self.queries, buf, win, 0, false, "", false):create_handler()
-      self:toggle_add(self._toggle_kind.popup, { win = win, buf = buf, close = popup_close })
-    elseif type(target) == "table" then
-      if target.type == ui.Target.new().type then
-        vim.cmd("split")
-        win = vim.api.nvim_get_current_win()
-      elseif target.type == ui.Target.vnew().type then
-        vim.cmd("vsplit")
-        win = vim.api.nvim_get_current_win()
-      elseif target.type == ui.Target.tabnew().type then
-        vim.cmd("tabnew")
-        win = vim.api.nvim_get_current_win()
-      end
+    -- Mode-specific logic delegated to CommandManager
+    self.command_manager:handle_command(target, buf, win, start_line, end_line, prefix, cursor, messages)
 
-      buf = vim.api.nvim_create_buf(true, true)
-      vim.api.nvim_set_current_buf(buf)
-
-      local group = utils.create_augroup("PrtScratchSave" .. utils.uuid(), { clear = true })
-      vim.api.nvim_create_autocmd({ "BufWritePre" }, {
-        buffer = buf,
-        group = group,
-        callback = function(ctx)
-          vim.api.nvim_set_option_value("buftype", "", { buf = ctx.buf })
-          vim.api.nvim_buf_set_name(ctx.buf, ctx.file)
-          vim.api.nvim_command("w!")
-          vim.api.nvim_del_augroup_by_id(ctx.group)
-        end,
-      })
-
-      local ft = target.filetype or filetype
-      vim.api.nvim_set_option_value("filetype", ft, { buf = buf })
-
-      handler = ResponseHandler:new(self.queries, buf, win, 0, false, "", cursor):create_handler()
-    end
-
-    -- call the model and write the response
+    -- Call the model and write the response
     prov:set_model(model_obj.name)
 
     local spinner = nil
@@ -1376,7 +1296,7 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
       return
     end
 
-    -- if prompt is not provided, run the command directly
+    -- If prompt is not provided, run the command directly
     if not prompt or prompt == "" then
       callback(nil)
       return
@@ -1392,19 +1312,18 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
         callback(input)
       end)
     else
-      logger.error("Invalid user input ui option: " .. self.options.user_input_ui)
+      logger.error("Invalid user input UI option: " .. self.options.user_input_ui)
     end
   end)
 end
 
--- call the API
----@param buf number | nil # buffer number
----@param provider table
----@param payload table # payload for api
----@param handler function # response handler
----@param on_exit function | nil # optional on_exit handler
+--- Sends a query to the provider's API.
+---@param buf number | nil Buffer number.
+---@param provider table Provider information.
+---@param payload table Payload for the API.
+---@param handler function Response handler function.
+---@param on_exit function | nil Optional on_exit handler.
 function ChatHandler:query(buf, provider, payload, handler, on_exit)
-  -- make sure handler is a function
   if type(handler) ~= "function" then
     logger.error(
       string.format("query() expects a handler function, but got %s:\n%s", type(handler), vim.inspect(handler))
@@ -1413,6 +1332,7 @@ function ChatHandler:query(buf, provider, payload, handler, on_exit)
   end
 
   if not provider:verify() then
+    logger.error("Provider verification failed")
     return
   end
 
@@ -1460,8 +1380,11 @@ function ChatHandler:query(buf, provider, payload, handler, on_exit)
     on_exit = function(response, exit_code)
       logger.debug("on_exit: " .. vim.inspect(response:result()))
       if exit_code ~= 0 then
-        logger.error("An error occured calling curl .. " .. table.concat(curl_params, " "))
-        on_exit(qid)
+        logger.error("An error occurred calling curl: " .. table.concat(curl_params, " "))
+        if on_exit then
+          on_exit(qid)
+        end
+        return
       end
       local result = response:result()
       result = utils.parse_raw_response(result)
@@ -1471,11 +1394,13 @@ function ChatHandler:query(buf, provider, payload, handler, on_exit)
         response.handle:close()
       end
 
-      on_exit(qid)
+      if on_exit then
+        on_exit(qid)
+      end
       local qt = self.queries:get(qid)
-      if qt.ns_id and qt.buf then
+      if qt and qt.ns_id and qt.buf then
         vim.schedule(function()
-          vim.api.nvim_buf_clear_namespace(qt.buf, qt.ns_id, 0, -1)
+          pcall(vim.api.nvim_buf_clear_namespace, qt.buf, qt.ns_id, 0, -1)
         end)
       end
       self.pool:remove(response.pid)
@@ -1497,8 +1422,25 @@ function ChatHandler:query(buf, provider, payload, handler, on_exit)
         end
       end
     end,
+    on_stderr = function(_, data)
+      if data and #data > 0 then
+        logger.error("Curl stderr: " .. table.concat(data, "\n"))
+      end
+    end,
   })
-  job:start()
+
+  -- Handle job start failure
+  local ok, err = pcall(function()
+    job:start()
+  end)
+  if not ok then
+    logger.error(string.format("Failed to start curl job: %s", err))
+    if on_exit then
+      on_exit(qid)
+    end
+    return
+  end
+
   self.pool:add(job, buf)
 end
 
