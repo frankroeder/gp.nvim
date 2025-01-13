@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2](https://github.com/frankroeder/parrot.nvim/compare/v1.2.1...v1.2.2) (2025-01-13)
+
+
+### Bug Fixes
+
+* add missing module in mistral provider ([b8f52da](https://github.com/frankroeder/parrot.nvim/commit/b8f52dab988a2c21d18aff3ba7806ddc36c2fe8d))
+* change current_provider default value to nil ([a8468be](https://github.com/frankroeder/parrot.nvim/commit/a8468be7311ac04b86bf08a05ea480f444b7c1ea))
+
 ## [1.2.1](https://github.com/frankroeder/parrot.nvim/compare/v1.2.0...v1.2.1) (2024-11-19)
 
 
