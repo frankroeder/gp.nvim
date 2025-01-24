@@ -1,4 +1,5 @@
 local pft = require("plenary.filetype")
+local Placeholders = require("parrot.placeholders")
 
 local M = {}
 
@@ -171,67 +172,6 @@ M.undojoin = function(buf)
   end
 end
 
--- Replace a key in a template string with a given value.
----@param template string # The template string
----@param key string # The key to replace
----@param value string|table # The value to replace the key with
----@return string # The rendered template
-M.template_replace = function(template, key, value)
-  if template == nil then
-    return nil
-  end
-
-  if value == nil then
-    return template:gsub(key, "")
-  end
-
-  if type(value) == "table" then
-    value = table.concat(value, "\n")
-  end
-
-  value = value:gsub("%%", "%%%%")
-  template = template:gsub(key, value)
-  template = template:gsub("%%%%", "%%")
-  return template
-end
-
--- Render a template by replacing multiple keys with their corresponding values.
----@param template string | nil # template string
----@param key_value_pairs table # table with key value pairs
----@return string | nil # returns rendered template with keys replaced by values from key_value_pairs
-M.template_render_from_list = function(template, key_value_pairs)
-  if template == nil then
-    return nil
-  end
-
-  for key, value in pairs(key_value_pairs) do
-    template = M.template_replace(template, key, value)
-  end
-
-  return template
-end
-
--- Render a template with specific placeholders.
----@param template string # The template string
----@param command string # The command
----@param selection string # The selected text
----@param filetype string # The file type
----@param filename string # The file name
----@param filecontent string # The file content
----@param multifilecontent string # The content of multiple files
----@return string # The rendered template
-M.template_render = function(template, command, selection, filetype, filename, filecontent, multifilecontent)
-  local key_value_pairs = {
-    ["{{command}}"] = command,
-    ["{{selection}}"] = selection,
-    ["{{filetype}}"] = filetype,
-    ["{{filename}}"] = filename,
-    ["{{filecontent}}"] = filecontent,
-    ["{{multifilecontent}}"] = multifilecontent,
-  }
-  return M.template_render_from_list(template, key_value_pairs)
-end
-
 -- Prepare the payload for a model request.
 ---@param messages table # The messages to include in the request
 ---@param model_name string # The name of the model
@@ -317,8 +257,9 @@ M.append_selection = function(params, origin_buf, target_buf, template_selection
     local fname = vim.api.nvim_buf_get_name(origin_buf)
     local filecontent = table.concat(vim.api.nvim_buf_get_lines(origin_buf, 0, -1, false), "\n")
     local multifilecontent = M.get_all_buffer_content()
-    local rendered =
-      M.template_render(template_selection, "", selection, filetype, fname, filecontent, multifilecontent)
+    local _placeholders =
+      Placeholders:new(template_selection, "", selection, filetype, fname, filecontent, multifilecontent)
+    local rendered = _placeholders:return_render()
     if rendered then
       selection = rendered
     end
