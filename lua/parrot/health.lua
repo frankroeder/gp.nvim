@@ -9,6 +9,12 @@ function M.check()
     vim.health.info("require('fzf-lua') failed")
   end
 
+  if vim.F.npcall(require, "telescope") then
+    vim.health.ok("require('telescope') succeeded")
+  else
+    vim.health.info("require('telescope') failed")
+  end
+
   if vim.F.npcall(require, "plenary") then
     vim.health.ok("require('plenary') succeeded")
   else

@@ -103,6 +103,7 @@ This plugin requires the latest version of Neovim and relies on a carefully sele
 - [`plenary`](https://github.com/nvim-lua/plenary.nvim)
 - [`ripgrep`](https://github.com/BurntSushi/ripgrep) (optional)
 - [`fzf`](https://github.com/junegunn/fzf) (optional, requires ripgrep)
+- [`telescope`](https://github.com/nvim-telescope/telescope.nvim) (optional)
 
 ### Installation
 
