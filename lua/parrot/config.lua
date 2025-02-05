@@ -7,25 +7,25 @@ local M = {
   logger = require("parrot.logger"),
 }
 local system_chat_prompt = [[
-You are a versatile AI assistant with capabilities
-extending to general knowledge and coding support. When engaging
-with users, please adhere to the following guidelines to ensure
-the highest quality of interaction:
+You are a highly capable AI assistant proficient in a wide range of topics,
+including general knowledge and coding support. When interacting with users,
+please adhere to the following guidelines to ensure high-quality assistance:
 
-- Admit when unsure by saying 'I don't know.'
-- Ask for clarification when needed.
-- Use first principles thinking to analyze queries.
-- Start with the big picture, then focus on details.
+- Admit when unsure by saying "I don't know."
+- Politely ask for clarification when needed.
+- Use first-principles thinking to analyze queries.
+- Start with the big picture before focusing on details.
 - Apply the Socratic method to enhance understanding.
 - Include all necessary code in your responses.
-- Stay calm and confident with each task.
+- Remain calm and confident with each task.
 ]]
 
 local system_command_prompt = [[
-You are an AI specializing in software development
-tasks, including code editing, completion, and debugging. Your
-responses should strictly pertain to the code provided. Please ensure
-that your reply is solely focused on the code snippet in question.
+You are an AI assistant specializing in software development and writing tasks, including
+code editing, rewriting, replacing, appending, and prepending code snippets
+interactively. Your responses should provide high-quality edits that focus
+solely on improving the provided snippet. Ensure your reply is exclusively
+focused on the snippet without any additional comments.
 ]]
 
 local topic_prompt = [[
@@ -221,7 +221,8 @@ local defaults = {
   {{optional}}
   ---
 
-  {{user}}]],
+  {{user}}
+  ]],
   template_selection = [[
   I have the following content from {{filename}}:
 
@@ -234,35 +235,50 @@ local defaults = {
   template_rewrite = [[
   I have the following content from {{filename}}:
 
+  <SELECTION>
   ```{{filetype}}
   {{selection}}
   ```
+  </SELECTION>
 
+  <FURTHER CONTEXT>
   {{command}}
-  Respond exclusively with the snippet that should replace the selection above.
+  </FURTHER CONTEXT>
+
+  Respond exclusively with the snippet that should replace the <SELECTION> above.
   DO NOT RESPOND WITH ANY TYPE OF COMMENTS, JUST THE CODE!!!
   ]],
   template_append = [[
   I have the following content from {{filename}}:
 
+  <SELECTION>
   ```{{filetype}}
   {{selection}}
   ```
+  </SELECTION>
 
+  <FURTHER CONTEXT>
   {{command}}
-  Respond exclusively with the snippet that should be appended after the selection above.
+  </FURTHER CONTEXT>
+
+  Respond exclusively with the snippet that should be appended after the <SELECTION> above.
   DO NOT RESPOND WITH ANY TYPE OF COMMENTS, JUST THE CODE!!!
   DO NOT REPEAT ANY CODE FROM ABOVE!!!
   ]],
   template_prepend = [[
   I have the following content from {{filename}}:
 
+  <SELECTION>
   ```{{filetype}}
   {{selection}}
   ```
+  </SELECTION>
 
+  <FURTHER CONTEXT>
   {{command}}
-  Respond exclusively with the snippet that should be prepended before the selection above.
+  </FURTHER CONTEXT>
+
+  Respond exclusively with the snippet that should be prepended before the <SELECTION> above.
   DO NOT RESPOND WITH ANY TYPE OF COMMENTS, JUST THE CODE!!!
   DO NOT REPEAT ANY CODE FROM ABOVE!!!
   ]],
@@ -324,7 +340,33 @@ local defaults = {
       parrot.Prompt(params, parrot.ui.Target.popup, model_obj, "🤖 Ask ~ ", template)
     end,
   },
+  prompts = {
+    ["ProofReader"] = "You are a professional proofreader looking for spell and grammar errors",
+    ["CodeFixer"] = [[
+    You are a proficient programmer in the provided language. I want you to
+    look for erros and bugs within the provided snippet. Simply assume that you
+    have access to the used libraries and packages, hence skip importing them.
+    ]],
+    ["CodeFixerContext"] = [[
+    You are a proficient programmer in the provided language. I want you to
+    look for erros and bugs within the provided snippet given the full file content
+
+    ```{{filetype}}
+    {{filecontent}}
+    ```
+    ]],
+  },
 }
+
+M.get_prompt_keys = function(options)
+  local keys = {}
+  for k, v in pairs(options.prompts) do
+    if v and v ~= "" then
+      table.insert(keys, k)
+    end
+  end
+  return keys
+end
 
 M.merge_providers = function(default_providers, user_providers)
   local result = {}
@@ -345,13 +387,18 @@ function M.setup(opts)
   end
 
   math.randomseed(os.time())
+  opts = opts or {}
+  opts.providers = opts.providers or {}
 
   local valid_provider_names = vim.tbl_keys(defaults.providers)
-  if not utils.has_valid_key(opts.providers, valid_provider_names) then
-    return vim.notify("Invalid provider configuration", vim.log.levels.ERROR)
-  end
+  -- print("DEFAULTS", vim.inspect(defaults.providers))
+  -- print("OPTS", vim.inspect(opts.providers))
+  -- print("NAMES", vim.inspect(valid_provider_names))
+  -- if not utils.has_valid_key(opts.providers, valid_provider_names) then
+  --   return vim.notify("Invalid provider configuration", vim.log.levels.ERROR)
+  -- end
 
-  M.options = vim.tbl_deep_extend("force", {}, defaults, opts or {})
+  M.options = vim.tbl_deep_extend("force", {}, defaults, opts)
   M.providers = M.merge_providers(defaults.providers, opts.providers)
   M.options.providers = nil
   M.hooks = M.options.hooks
@@ -457,6 +504,9 @@ M.add_default_commands = function(commands, hooks, options)
     ChatPaste = { "popup", "split", "vsplit", "tabnew" },
     ChatToggle = { "popup", "split", "vsplit", "tabnew" },
     Context = { "popup", "split", "vsplit", "tabnew" },
+    Rewrite = M.get_prompt_keys(options),
+    Append = M.get_prompt_keys(options),
+    Preprend = M.get_prompt_keys(options),
   }
   -- register default commands
   for cmd, cmd_func in pairs(commands) do

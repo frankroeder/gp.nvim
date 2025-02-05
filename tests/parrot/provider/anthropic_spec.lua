@@ -15,37 +15,36 @@ describe("Anthropic", function()
     assert.are.same(anthropic.name, "anthropic")
   end)
 
-  -- TODO: preprocess_payload output is nil --
-  -- describe("preprocess_payload", function()
-  --   it("should handle payload with system message correctly", function()
-  --     local input = {
-  --       max_tokens = 4096,
-  --       messages = {
-  --         {
-  --           content = "You are a versatile AI assistant with capabilities\nextending to general knowledge and coding support. When engaging\nwith users, please adhere to the following guidelines to ensure\nthe highest quality of interaction:\n\n- Admit when unsure by saying 'I don't know.'\n- Ask for clarification when needed.\n- Use first principles thinking to analyze queries.\n- Start with the big picture, then focus on details.\n- Apply the Socratic method to enhance understanding.\n- Include all necessary code in your responses.\n- Stay calm and confident with each task.\n",
-  --           role = "system",
-  --         },
-  --         { content = "Who are you?", role = "user" },
-  --       },
-  --       model = "claude-3-haiku-20240307",
-  --       stream = true,
-  --     }
-  --
-  --     local expected = {
-  --       max_tokens = 4096,
-  --       messages = {
-  --         { content = "Who are you?", role = "user" },
-  --       },
-  --       model = "claude-3-haiku-20240307",
-  --       stream = true,
-  --       system = "You are a versatile AI assistant with capabilities\nextending to general knowledge and coding support. When engaging\nwith users, please adhere to the following guidelines to ensure\nthe highest quality of interaction:\n\n- Admit when unsure by saying 'I don't know.'\n- Ask for clarification when needed.\n- Use first principles thinking to analyze queries.\n- Start with the big picture, then focus on details.\n- Apply the Socratic method to enhance understanding.\n- Include all necessary code in your responses.\n- Stay calm and confident with each task.",
-  --     }
-  --
-  --     local result = anthropic:preprocess_payload(input)
-  --
-  --     assert.are.same(expected, result)
-  --   end)
-  -- end)
+  describe("preprocess_payload", function()
+    it("should handle payload with system message correctly", function()
+      local input = {
+        max_tokens = 4096,
+        messages = {
+          {
+            content = "You are a versatile AI assistant with capabilities\nextending to general knowledge and coding support. When engaging\nwith users, please adhere to the following guidelines to ensure\nthe highest quality of interaction:\n\n- Admit when unsure by saying 'I don't know.'\n- Ask for clarification when needed.\n- Use first principles thinking to analyze queries.\n- Start with the big picture, then focus on details.\n- Apply the Socratic method to enhance understanding.\n- Include all necessary code in your responses.\n- Stay calm and confident with each task.\n",
+            role = "system",
+          },
+          { content = "Who are you?", role = "user" },
+        },
+        model = "claude-3-haiku-20240307",
+        stream = true,
+      }
+
+      local expected = {
+        max_tokens = 4096,
+        messages = {
+          { content = "Who are you?", role = "user" },
+        },
+        model = "claude-3-haiku-20240307",
+        stream = true,
+        system = "You are a versatile AI assistant with capabilities\nextending to general knowledge and coding support. When engaging\nwith users, please adhere to the following guidelines to ensure\nthe highest quality of interaction:\n\n- Admit when unsure by saying 'I don't know.'\n- Ask for clarification when needed.\n- Use first principles thinking to analyze queries.\n- Start with the big picture, then focus on details.\n- Apply the Socratic method to enhance understanding.\n- Include all necessary code in your responses.\n- Stay calm and confident with each task.",
+      }
+
+      local result = anthropic:preprocess_payload(input)
+
+      assert.are.same(expected, result)
+    end)
+  end)
 
   describe("verify", function()
     it("should return true for a valid API key", function()

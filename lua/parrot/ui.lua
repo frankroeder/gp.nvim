@@ -156,26 +156,6 @@ M.create_popup = function(buf, title, size_func, opts, style)
   return buf, win, close, resize
 end
 
--- returns rendered template with specified key replaced by value
-M.template_replace = function(template, key, value)
-  if template == nil then
-    return nil
-  end
-
-  if value == nil then
-    return template:gsub(key, "")
-  end
-
-  if type(value) == "table" then
-    value = table.concat(value, "\n")
-  end
-
-  value = value:gsub("%%", "%%%%")
-  template = template:gsub(key, value)
-  template = template:gsub("%%%%", "%%")
-  return template
-end
-
 M.input = function(opts, on_confirm)
   vim.validate({
     opts = { opts, "table", true },

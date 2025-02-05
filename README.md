@@ -218,10 +218,10 @@ Additional useful commands are implemented through hooks (see below).
 | `PrtModel <model>`        | Switch the model (empty arg triggers fzf)     |
 | `PrtStatus`               | Prints current provider and model selection   |
 |  __Interactive__          | |
-| `PrtRewrite`              | Rewrites the visual selection based on a provided prompt |
+| `PrtRewrite <optional prompt>` | Rewrites the visual selection based on a provided prompt (direct input, input dialog or from collection) |
 | `PrtEdit`                 | Like `PrtRewrite` but you can change the last prompt |
-| `PrtAppend`               | Append text to the visual selection based on a provided prompt    |
-| `PrtPrepend`              | Prepend text to the visual selection based on a provided prompt   |
+| `PrtAppend <optional prompt>` | Append text to the visual selection based on a provided prompt (direct input, input dialog or from collection) |
+| `PrtPrepend <optional prompt>` | Prepend text to the visual selection based on a provided prompt (direct input, input dialog or from collection) |
 | `PrtNew`                  | Prompt the model to respond in a new window   |
 | `PrtEnew`                 | Prompt the model to respond in a new buffer   |
 | `PrtVnew`                 | Prompt the model to respond in a vsplit       |
@@ -448,6 +448,25 @@ require("parrot").setup {
 
 Refer to my [personal lazy.nvim setup](https://github.com/frankroeder/dotfiles/blob/master/nvim/lua/plugins/parrot.lua) or
 those of [other users](https://github.com/search?utf8=%E2%9C%93&q=frankroeder%2Fparrot.nvim+language%3ALua&type=code&l=Lua) for further hooks and key bindings.
+
+### Prompt Collection
+
+If you're repeatedly typing the same prompts into the input fields when using
+`PrtRewrite`, `PrtAppend`, or `PrtPrepend`, a more lightweight alternative to
+user commands (also known as hooks) is to define prompts as follows:
+```lua
+require("parrot").setup {
+    -- ...
+    prompts = {
+        ["Spell"] = "I want you to proofread the provided text and fix the errors." -- e.g., :'<,'>PrtRewrite Spell
+        ["Comment"] = "Provide a comment that explains what the snippet is doing." -- e.g., :'<,'>PrtPrepend Comment
+        ["Complete"] = "Continue the implementation of the provided snippet in the file {{filename}}." -- e.g., :'<,'>PrtAppend Complete
+    }
+    -- ...
+}
+```
+They will appear as arguments for the aforementioned interactive commands and
+can also be used with the [template placeholders](#template-placeholders).
 
 ### Template Placeholders
 

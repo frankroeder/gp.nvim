@@ -11,6 +11,7 @@ local Spinner = require("parrot.spinner")
 local Job = require("plenary.job")
 local pft = require("plenary.filetype")
 local ResponseHandler = require("parrot.response_handler")
+local Placeholders = require("parrot.placeholders")
 
 local ChatHandler = {}
 
@@ -275,7 +276,7 @@ function ChatHandler:prepare_commands()
           template = self.options.template_prepend
         end
       end
-      local cmd_prefix = utils.template_render_from_list(
+      local cmd_prefix = Placeholders:new():render_from_list(
         self.options.command_prompt_prefix_template,
         { ["{{llm}}"] = self:get_model("command").name }
       )
@@ -490,13 +491,14 @@ function ChatHandler:_new_chat(params, toggle, chat_prompt)
     local fname = vim.api.nvim_buf_get_name(cbuf)
     local filecontent = table.concat(vim.api.nvim_buf_get_lines(cbuf, 0, -1, false), "\n")
     local multifilecontent = utils.get_all_buffer_content()
-    chat_prompt = utils.template_render(chat_prompt, "", "", filetype, fname, filecontent, multifilecontent)
+    local chat_placeholders = Placeholders:new(chat_prompt, "", "", filetype, fname, filecontent, multifilecontent)
+    chat_prompt = chat_placeholders:return_render()
     chat_prompt = "- system: " .. utils.trim(chat_prompt):gsub("\n", " ") .. "\n"
   else
     chat_prompt = ""
   end
 
-  local template = utils.template_render_from_list(utils.trim(self.options.chat_template), {
+  local template = Placeholders:new():render_from_list(utils.trim(self.options.chat_template), {
     ["{{user}}"] = self.options.chat_user_prefix,
     ["{{optional}}"] = chat_prompt,
   })
@@ -705,7 +707,8 @@ function ChatHandler:_chat_respond(params)
   local llm_suffix = "[{{llm}}]"
   local provider = query_prov.name
   ---@diagnostic disable-next-line: cast-local-type
-  llm_suffix = utils.template_render_from_list(llm_suffix, { ["{{llm}}"] = model_name .. " - " .. provider })
+  ---
+  llm_suffix = Placeholders:new():render_from_list(llm_suffix, { ["{{llm}}"] = model_name .. " - " .. provider })
 
   for index = start_index, end_index do
     local line = lines[index]
@@ -1395,7 +1398,9 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
     local filename = vim.api.nvim_buf_get_name(buf)
     local prov = model_obj.provider
     self.history.last_command = command
-    local sys_prompt = utils.template_render(model_obj.system_prompt, command, selection, filetype, filename)
+
+    local sys_placeholders = Placeholders:new(model_obj.system_prompt, command, selection, filetype, filename, nil, nil)
+    local sys_prompt = sys_placeholders:return_render()
     sys_prompt = sys_prompt or ""
 
     if sys_prompt ~= "" then
@@ -1409,8 +1414,10 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
 
     local filecontent = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
     local multifilecontent = utils.get_all_buffer_content()
-    local user_prompt =
-      utils.template_render(template, command, selection, filetype, filename, filecontent, multifilecontent)
+
+    local user_placeholders =
+      Placeholders:new(template, command, selection, filetype, filename, filecontent, multifilecontent)
+    local user_prompt = user_placeholders:return_render()
     table.insert(messages, { role = "user", content = user_prompt })
     logger.debug("ChatHandler:prompt - `user_prompt`: " .. user_prompt)
 
@@ -1527,10 +1534,17 @@ function ChatHandler:prompt(params, target, model_obj, prompt, template, reset_h
   end
 
   vim.schedule(function()
-    local args = params.args or ""
-    if args:match("%S") then
-      callback(args)
+    if params.args and self.options.prompts[params.args] then
+      local predefined_prompt = self.options.prompts[params.args]
+      logger.debug("ChatHandler: predefined_prompt" .. predefined_prompt)
+      callback(predefined_prompt)
       return
+    else
+      local args = params.args or ""
+      if args:match("%S") then
+        callback(args)
+        return
+      end
     end
 
     -- if prompt is not provided, run the command directly
